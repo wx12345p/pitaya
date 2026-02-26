@@ -84,6 +84,7 @@ run-rate-limiting-example:
 
 protos-compile-demo:
 	@protoc -I examples/demo/protos examples/demo/protos/*.proto --go_out=.
+	@protoc -I examples/demo/landlord/protos examples/demo/landlord/protos/*.proto --go_out=.
 
 protos-compile:
 	@cd benchmark/testdata && ./gen_proto.sh

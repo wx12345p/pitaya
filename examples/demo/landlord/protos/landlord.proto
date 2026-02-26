@@ -1,0 +1,145 @@
+syntax = "proto3";
+
+package landlord_protos;
+option go_package = "examples/demo/landlord/protos";
+
+// ==================== 请求消息 ====================
+
+// JoinRequest 加入匹配队列请求
+message JoinRequest {
+  string player_name = 1;
+}
+
+// BidRequest 叫分请求
+message BidRequest {
+  int32 score = 1; // 0=不叫, 1/2/3=叫分
+}
+
+// PlayRequest 出牌请求
+message PlayRequest {
+  repeated int32 card_ids = 1; // 要出的牌ID列表
+}
+
+// PassRequest 不出请求
+message PassRequest {}
+
+// ==================== 响应消息 ====================
+
+// JoinResponse 加入匹配队列响应
+message JoinResponse {
+  int32  code    = 1; // 0=成功
+  string message = 2; // 提示消息
+  string room_id = 3; // 房间ID
+  int32  seat    = 4; // 座位号 (0, 1, 2)
+}
+
+// BidResponse 叫分响应
+message BidResponse {
+  int32  code    = 1;
+  string message = 2;
+}
+
+// PlayResponse 出牌响应
+message PlayResponse {
+  int32  code    = 1;
+  string message = 2;
+}
+
+// PassResponse 不出响应
+message PassResponse {
+  int32  code    = 1;
+  string message = 2;
+}
+
+// ==================== 服务端推送消息 ====================
+
+// PlayerInfo 玩家基础信息
+message PlayerInfo {
+  string uid        = 1;
+  string name       = 2;
+  int32  seat       = 3;
+  bool   is_ai      = 4;
+  int32  card_count = 5; // 剩余手牌数
+}
+
+// GameStartPush 游戏开始推送
+message GameStartPush {
+  string             room_id      = 1;
+  repeated PlayerInfo players     = 2;
+  repeated int32     your_cards   = 3; // 你的手牌ID列表
+  int32              first_bidder = 4; // 首先叫分的座位
+}
+
+// BidTurnPush 轮到某人叫分
+message BidTurnPush {
+  int32 seat    = 1; // 当前叫分的座位号
+  int32 max_bid = 2; // 当前最高叫分
+}
+
+// BidResultPush 叫分结果
+message BidResultPush {
+  int32  seat  = 1; // 叫分玩家的座位
+  int32  score = 2; // 叫的分数 (0=不叫)
+  string name  = 3; // 玩家名字
+}
+
+// LandlordDecidedPush 地主确定推送
+message LandlordDecidedPush {
+  int32          landlord_seat = 1; // 地主座位号
+  string         landlord_name = 2; // 地主名字
+  repeated int32 bottom_cards  = 3; // 底牌（所有人可见）
+  repeated int32 your_cards    = 4; // 更新后的你的手牌
+  int32          bid_score     = 5; // 最终叫分
+}
+
+// PlayTurnPush 轮到某人出牌
+message PlayTurnPush {
+  int32          seat       = 1; // 当前出牌的座位号
+  bool           can_pass   = 2; // 是否可以不出
+  repeated int32 last_cards = 3; // 上一手出的牌（空表示自由出牌）
+  int32          last_seat  = 4; // 上一手出牌的座位（-1 表示无）
+}
+
+// CardPlayedPush 某人出了牌
+message CardPlayedPush {
+  int32          seat       = 1; // 出牌玩家的座位
+  repeated int32 cards      = 2; // 出的牌ID
+  string         hand_type  = 3; // 牌型名称
+  int32          card_count = 4; // 该玩家剩余手牌数
+  string         name       = 5; // 玩家名字
+}
+
+// PassPush 某人不出
+message PassPush {
+  int32  seat = 1; // 不出的座位
+  string name = 2; // 玩家名字
+}
+
+// GameEndPush 游戏结束
+message GameEndPush {
+  int32  winner_seat  = 1; // 赢家座位
+  string winner_name  = 2; // 赢家名字
+  bool   is_landlord  = 3; // 赢家是否是地主
+  bool   landlord_win = 4; // 地主是否获胜
+  int32  bid_score    = 5; // 叫分倍数
+  int32  bomb_count   = 6; // 炸弹数量（翻倍用）
+  bool   spring       = 7; // 是否春天
+}
+
+// GameErrorPush 游戏错误推送
+message GameErrorPush {
+  int32  code    = 1;
+  string message = 2;
+}
+
+// RoomInfoRequest 获取房间信息请求
+message RoomInfoRequest {
+  string room_id = 1;
+}
+
+// RoomInfoResponse 获取房间信息响应
+message RoomInfoResponse {
+  string              room_id = 1;
+  string              state   = 2;
+  repeated PlayerInfo players = 3;
+}
