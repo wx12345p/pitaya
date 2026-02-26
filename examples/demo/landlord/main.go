@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/topfreegames/pitaya/v3/examples/demo/landlord/services"
 	pitaya "github.com/topfreegames/pitaya/v3/pkg"
@@ -26,6 +27,7 @@ func main() {
 	log.Printf("启动 %s 服务器 (frontend=%v, port=%d)", *svType, *isFrontend, *port)
 
 	conf := config.NewDefaultPitayaConfig()
+	conf.Heartbeat.Interval = time.Duration(5 * time.Second)
 	builder := pitaya.NewDefaultBuilder(*isFrontend, *svType, pitaya.Cluster, map[string]string{}, *conf)
 
 	if *isFrontend {
