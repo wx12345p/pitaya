@@ -274,6 +274,12 @@ func (r *Room) FillAI() {
 func (r *Room) StartGame() {
 	r.mu.Lock()
 
+	if r.State != StateWaiting {
+		r.mu.Unlock()
+		log.Printf("[Room %s] StartGame 被重复调用，当前状态: %s，忽略", r.ID, r.State.String())
+		return
+	}
+
 	// 发牌
 	result := Deal()
 	r.Players[0].Cards = result.Player1
@@ -537,15 +543,15 @@ func (r *Room) HandlePass(seat int) error {
 
 	log.Printf("[Room %s] 座位%d (%s) 不出", r.ID, seat, player.Name)
 
+	r.CurrentTurn = (r.CurrentTurn + 1) % 3
+
 	// 如果连续2人不出，下一个人自由出牌
 	if r.PassCount >= 2 {
-		r.LastPlaySeat = r.CurrentTurn // 这会使下一手变成自由出牌
+		r.LastPlaySeat = r.CurrentTurn // 设为即将出牌的人，使其满足 isFirstPlay 条件
 		r.LastPlayCards = nil
 		r.LastHandInfo = HandInfo{Type: HandTypeNone}
 		r.PassCount = 0
 	}
-
-	r.CurrentTurn = (r.CurrentTurn + 1) % 3
 	r.mu.Unlock()
 
 	// 通知不出

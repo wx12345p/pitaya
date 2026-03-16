@@ -74,9 +74,11 @@ func (h *GameHandler) Join(ctx context.Context, req *protos.JoinRequest) (*proto
 	room, seat := h.roomManager.JoinOrCreate(uid, name)
 	h.playerRooms.Store(uid, room.ID)
 
-	// 设置房间的回调和AI策略
-	h.setupRoomCallbacks(room)
-	room.AIStrategy = h.aiStrategy
+	// 仅在新创建房间（座位0）时设置回调和AI策略，避免重复设置
+	if seat == 0 {
+		h.setupRoomCallbacks(room)
+		room.AIStrategy = h.aiStrategy
+	}
 
 	log.Printf("[GameHandler] 玩家 %s 加入房间 %s 座位 %d (当前%d人)",
 		name, room.ID, seat, room.PlayerCount())
@@ -315,6 +317,13 @@ func (h *GameHandler) onGameEnd(room *game.Room, winnerSeat int) {
 		Spring:      room.IsSpring(),
 	}
 	h.pushToRoom(room, "onGameEnd", push)
+
+	// 清理玩家->房间映射
+	for _, p := range room.Players {
+		if p != nil {
+			h.playerRooms.Delete(p.UID)
+		}
+	}
 
 	// 清理房间
 	h.roomManager.RemoveRoom(room.ID)
