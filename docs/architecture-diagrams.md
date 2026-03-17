@@ -571,3 +571,194 @@ flowchart TB
     style ETCD fill:#FFF9C4
     style NATS fill:#FFE0B2
 ```
+
+## 十、一条消息的完整生命周期（含对象对应关系与 goroutine 模型）
+
+> 下图展示了一条客户端 Request 消息进入系统、被处理、返回 Response 的全过程。
+> 每条连线上标注了对象间的**数量关系**和流转方向。
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                                     App (1个实例)                                       │
+│                                                                                         │
+│  ┌──────────────────────────────────────────────────────────────────────────────────┐    │
+│  │                          网络接入层                                               │    │
+│  │                                                                                  │    │
+│  │   ┌─────────────┐  1:N  ┌─────────────┐                                         │    │
+│  │   │ Acceptor(TCP)│──────→│ PlayerConn  │  每个客户端连接产生一个 PlayerConn        │    │
+│  │   │  监听 :3250  │       │ (TCP连接)   │                                         │    │
+│  │   └──────┬───────┘       └──────┬──────┘                                         │    │
+│  │          │                      │                                                │    │
+│  │   ┌──────┴───────┐              │  App 可有多个 Acceptor (TCP + WS)               │    │
+│  │   │ Acceptor(WS) │              │  App : Acceptor = 1 : N                        │    │
+│  │   │  监听 :3251  │              │                                                │    │
+│  │   └──────────────┘              │                                                │    │
+│  └─────────────────────────────────┼────────────────────────────────────────────────┘    │
+│                                    │                                                     │
+│                                    │ 每个连接启动一个 goroutine:                          │
+│                                    │ go handlerService.Handle(conn)                      │
+│                                    ▼                                                     │
+│  ┌──────────────────────────────────────────────────────────────────────────────────┐    │
+│  │                    HandlerService (1个实例)                                       │    │
+│  │                                                                                  │    │
+│  │   Handle(conn) 内部:                                                             │    │
+│  │   ┌─────────────────────────────────────────────────┐                            │    │
+│  │   │  PlayerConn : Agent = 1 : 1                     │                            │    │
+│  │   │  Agent : Session = 1 : 1                        │                            │    │
+│  │   │                                                 │                            │    │
+│  │   │  ┌──────────┐ 1:1 ┌───────┐ 1:1 ┌─────────┐   │                            │    │
+│  │   │  │PlayerConn│────→│ Agent │────→│ Session │   │   每个连接独占一套             │    │
+│  │   │  └──────────┘     └───┬───┘     └─────────┘   │                            │    │
+│  │   │                       │                         │                            │    │
+│  │   │          Agent 内部启动 3 个 goroutine:          │                            │    │
+│  │   │          ┌─ go write()       写出响应            │                            │    │
+│  │   │          ├─ go heartbeat()   心跳检测            │                            │    │
+│  │   │          └─ Handle()主循环    等待关闭信号        │                            │    │
+│  │   └─────────────────────────────────────────────────┘                            │    │
+│  │                                                                                  │    │
+│  │   Handle() 读循环 (每个连接一个 goroutine):                                       │    │
+│  │   ┌──────────────────────────────────────────────────────────────────────┐        │    │
+│  │   │ conn.GetNextMessage()  →  decoder.Decode()  →  processPacket()     │        │    │
+│  │   │                                                      │              │        │    │
+│  │   │                                          packet.Data │              │        │    │
+│  │   │                                                      ▼              │        │    │
+│  │   │                                          message.Decode()           │        │    │
+│  │   │                                                      │              │        │    │
+│  │   │                                                      ▼              │        │    │
+│  │   │                                          processMessage()           │        │    │
+│  │   │                                          route.Decode()             │        │    │
+│  │   │                                                      │              │        │    │
+│  │   │                              ┌───────────────────────┼──────┐       │        │    │
+│  │   │                              │ route.SvType==本机?   │      │       │        │    │
+│  │   │                              │        YES            │ NO   │       │        │    │
+│  │   │                              ▼                       ▼      │       │        │    │
+│  │   │                     ┌────────────────┐    ┌─────────────────┤       │        │    │
+│  │   │                     │ chLocalProcess │    │chRemoteProcess  │       │        │    │
+│  │   │                     │  (buffered ch) │    │ (buffered ch)   │       │        │    │
+│  │   │                     └───────┬────────┘    └────────┬────────┘       │        │    │
+│  │   └─────────────────────────────┼──────────────────────┼────────────────┘        │    │
+│  │                                 │                      │                          │    │
+│  │    N:1 多个连接的消息 ──→ 汇入同一个 channel ──→ 被 Dispatch 协程消费               │    │
+│  │                                 │                      │                          │    │
+│  │   ┌─────────────────────────────┼──────────────────────┼──────────────────┐      │    │
+│  │   │      Dispatch goroutines (N个, 可配置)             │                  │      │    │
+│  │   │      App : Dispatch协程 = 1 : N                    │                  │      │    │
+│  │   │                                                    │                  │      │    │
+│  │   │      select {                                      │                  │      │    │
+│  │   │        case lm := <-chLocalProcess:                │                  │      │    │
+│  │   │              localProcess()  ◄─────────────────────┘                  │      │    │
+│  │   │        case rm := <-chRemoteProcess:                                  │      │    │
+│  │   │              remoteService.remoteProcess()                            │      │    │
+│  │   │      }                                                                │      │    │
+│  │   └───────────────┬──────────────────────────────┬────────────────────────┘      │    │
+│  │                   │                              │                                │    │
+│  └───────────────────┼──────────────────────────────┼────────────────────────────────┘    │
+│                      │                              │                                     │
+│          ┌───────────▼───────────┐      ┌───────────▼────────────────┐                    │
+│          │     本地处理流程       │      │      远程处理流程           │                    │
+│          │                       │      │                            │                    │
+│          │  HandlerPool (1个)    │      │  RemoteService (1个)       │                    │
+│          │      │                │      │      │                     │                    │
+│          │      ▼                │      │      ▼                     │                    │
+│          │  BeforeHandler hooks  │      │  Router (1个)              │                    │
+│          │      │                │      │  从 ServiceDiscovery       │                    │
+│          │      ▼                │      │  获取目标 Server           │                    │
+│          │  Handler 方法         │      │      │                     │                    │
+│          │  如 Room.Join(ctx)    │      │      ▼                     │                    │
+│          │      │                │      │  RPCClient (1个)           │                    │
+│          │      ▼                │      │  .Call() ──NATS/gRPC──→   │                    │
+│          │  AfterHandler hooks   │      │       远端 RPCServer       │                    │
+│          │      │                │      │      │                     │                    │
+│          │      ▼                │      │      ▼                     │                    │
+│          │  返回结果 result      │      │  收到 protos.Response      │                    │
+│          └───────────┬───────────┘      └───────────┬────────────────┘                    │
+│                      │                              │                                     │
+│                      └──────────────┬───────────────┘                                     │
+│                                     │                                                     │
+│                                     ▼                                                     │
+│  ┌──────────────────────────────────────────────────────────────────────────────────┐    │
+│  │                         响应发送流程 (Agent 内部)                                  │    │
+│  │                                                                                  │    │
+│  │   agent.ResponseMID(mid, result)                                                 │    │
+│  │         │                                                                        │    │
+│  │         ▼                                                                        │    │
+│  │   Serializer.Serialize()     ── 序列化 (JSON/Protobuf)                           │    │
+│  │         │                                                                        │    │
+│  │         ▼                                                                        │    │
+│  │   MessageEncoder.Encode()    ── 消息编码 (type+id+route+data)                    │    │
+│  │         │                                                                        │    │
+│  │         ▼                                                                        │    │
+│  │   PacketEncoder.Encode()     ── 包编码 (type+length+body)                        │    │
+│  │         │                                                                        │    │
+│  │         ▼                                                                        │    │
+│  │   chSend <- pendingWrite     ── 写入发送队列                                      │    │
+│  │         │                       Agent : chSend = 1 : 1                           │    │
+│  │         ▼                                                                        │    │
+│  │   write() goroutine          ── 从 chSend 读取                                   │    │
+│  │         │                                                                        │    │
+│  │         ▼                                                                        │    │
+│  │   conn.Write(data)           ── 写入 TCP/WS 连接                                 │    │
+│  │         │                                                                        │    │
+│  └─────────┼────────────────────────────────────────────────────────────────────────┘    │
+│            │                                                                             │
+└────────────┼─────────────────────────────────────────────────────────────────────────────┘
+             │
+             ▼
+        ┌──────────┐
+        │  客户端   │  收到 Response
+        └──────────┘
+```
+
+### 对象数量关系汇总表
+
+```
+┌──────────────────────┬──────────────────────┬────────┬─────────────────────────────────────┐
+│       对象 A          │       对象 B          │  关系  │              说明                    │
+├──────────────────────┼──────────────────────┼────────┼─────────────────────────────────────┤
+│ App                  │ Acceptor             │ 1 : N  │ 可同时监听 TCP + WS 等多个端口       │
+│ App                  │ HandlerService       │ 1 : 1  │ 唯一的消息处理服务                    │
+│ App                  │ RemoteService        │ 1 : 1  │ 唯一的远程调用服务(Cluster模式)       │
+│ App                  │ RPCClient            │ 1 : 1  │ 唯一的 RPC 客户端                    │
+│ App                  │ RPCServer            │ 1 : 1  │ 唯一的 RPC 服务端                    │
+│ App                  │ ServiceDiscovery     │ 1 : 1  │ 唯一的服务发现客户端                  │
+│ App                  │ SessionPool          │ 1 : 1  │ 唯一的 Session 管理池                 │
+│ App                  │ Router               │ 1 : 1  │ 唯一的路由决策器                      │
+│ App                  │ Serializer           │ 1 : 1  │ 唯一的序列化器(JSON或Protobuf)        │
+├──────────────────────┼──────────────────────┼────────┼─────────────────────────────────────┤
+│ Acceptor             │ PlayerConn           │ 1 : N  │ 一个监听端口接受多个客户端连接         │
+│ PlayerConn           │ Agent                │ 1 : 1  │ 每个连接创建一个独占的 Agent           │
+│ Agent                │ Session              │ 1 : 1  │ 每个 Agent 绑定一个 Session           │
+│ Agent                │ chSend               │ 1 : 1  │ 每个 Agent 有独立的发送队列            │
+│ SessionPool          │ Session              │ 1 : N  │ 池管理所有 Session                    │
+├──────────────────────┼──────────────────────┼────────┼─────────────────────────────────────┤
+│ HandlerService       │ Dispatch goroutine   │ 1 : N  │ 可配置并发数(默认多个worker)          │
+│ HandlerService       │ chLocalProcess       │ 1 : 1  │ 唯一的本地处理 channel                │
+│ HandlerService       │ chRemoteProcess      │ 1 : 1  │ 唯一的远程处理 channel                │
+│ HandlerService       │ HandlerPool          │ 1 : 1  │ 唯一的 Handler 方法池                 │
+├──────────────────────┼──────────────────────┼────────┼─────────────────────────────────────┤
+│ 多个 PlayerConn      │ chLocalProcess       │ N : 1  │ 所有连接的本地消息汇入同一 channel     │
+│ 多个 PlayerConn      │ chRemoteProcess      │ N : 1  │ 所有连接的远程消息汇入同一 channel     │
+│ chLocalProcess       │ Dispatch goroutine   │ 1 : N  │ 多个 Dispatch 竞争消费同一 channel    │
+└──────────────────────┴──────────────────────┴────────┴─────────────────────────────────────┘
+```
+
+### Goroutine 模型一览
+
+```
+App 启动后的 goroutine 分布:
+
+ App
+  ├── 每个 Acceptor:
+  │    ├── [1 goroutine] ListenAndServe()          -- 监听端口、accept 连接
+  │    └── [1 goroutine] for conn := range connChan -- 分发新连接
+  │
+  ├── [N goroutines] Dispatch(0..N-1)              -- 消费 channel, 执行业务逻辑
+  │                                                    N = config.Concurrency.Handler.Dispatch
+  │
+  └── 每个客户端连接 (动态创建):
+       ├── [1 goroutine] HandlerService.Handle()   -- 读循环: 读包→解码→投入 channel
+       ├── [1 goroutine] Agent.write()             -- 写循环: 从 chSend 读取→写入连接
+       └── [1 goroutine] Agent.heartbeat()         -- 心跳: 定时发心跳包 + 超时检测
+
+  总 goroutine 数 ≈ 2×Acceptor数 + N(Dispatch) + 3×客户端连接数
+```
