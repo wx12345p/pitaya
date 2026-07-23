@@ -1,0 +1,299 @@
+syntax = "proto3";
+
+package richman_protos;
+option go_package = "examples/demo/richman/protos";
+
+// =====================================================================
+// 大富翁10 房间对战 - 通信协议
+//
+// 说明: Pitaya 的 handler 路由在 Go 代码中注册, 下方 service 仅用于
+//       正式描述"客户端可调用的接口"(请求/响应)。服务端到客户端的
+//       推送(Push)不走 rpc, 统一在文件末尾用注释列出路由与消息。
+// =====================================================================
+
+// ==================== 枚举 ====================
+
+// ResultCode 通用结果码
+enum ResultCode {
+  RESULT_OK = 0;          // 成功
+  RESULT_ERROR = 1;       // 通用错误
+  RESULT_NOT_LOGIN = 2;   // 未登录
+  RESULT_NOT_IN_ROOM = 3; // 不在房间中
+  RESULT_BAD_TURN = 4;    // 非法操作回合/状态
+}
+
+// TileType 地块类型
+enum TileType {
+  TILE_START = 0;    // 起点(经过/停留发工资)
+  TILE_PROPERTY = 1; // 可购买地产
+  TILE_CHANCE = 2;   // 机会
+  TILE_FATE = 3;     // 命运
+  TILE_TAX = 4;      // 税收
+  TILE_STOP = 5;     // 普通停留
+}
+
+// CardType 卡片类型
+enum CardType {
+  CARD_CHANCE = 0; // 机会
+  CARD_FATE = 1;   // 命运
+}
+
+// RoomState 房间状态
+enum RoomState {
+  ROOM_WAITING = 0;    // 等待玩家
+  ROOM_PLAYING = 1;    // 游戏中
+  ROOM_SETTLEMENT = 2; // 结算
+}
+
+// EndReason 对局结束原因
+enum EndReason {
+  END_UNKNOWN = 0;       // 未知
+  END_LAST_STANDING = 1; // 仅剩一名未破产玩家
+  END_ROUND_LIMIT = 2;   // 达到回合上限
+}
+
+// PropertyAction 地产变更动作
+enum PropertyAction {
+  PROP_BUY = 0;     // 购买
+  PROP_UPGRADE = 1; // 升级
+}
+
+// ==================== 公共结构 ====================
+
+// PlayerInfo 玩家信息
+message PlayerInfo {
+  string uid      = 1;
+  string name     = 2;
+  int32  seat     = 3;
+  int64  money    = 4;
+  int32  pos      = 5;
+  bool   bankrupt = 6;
+  bool   is_ai    = 7;
+}
+
+// TileInfo 地块信息
+message TileInfo {
+  int32    index     = 1;
+  TileType type      = 2;
+  string   name      = 3;
+  int64    price     = 4; // 地产基础价
+  int64    base_toll = 5; // 地产基础过路费
+  string   owner_uid = 6; // 所有者(空=无主)
+  int32    level     = 7; // 地产等级(0=空地,1..3)
+  int64    tax       = 8; // 税收金额(税收格)
+}
+
+// RankItem 结算排名项
+message RankItem {
+  string uid         = 1;
+  string name        = 2;
+  int64  total_asset = 3; // 现金+地产估值
+  int32  rank        = 4;
+  bool   bankrupt    = 5;
+}
+
+// ==================== 请求 / 响应 ====================
+
+// LoginRequest 登录请求
+message LoginRequest {
+  string player_name = 1;
+}
+
+// LoginResponse 登录响应
+message LoginResponse {
+  ResultCode code = 1;
+  string     msg  = 2;
+  string     uid  = 3;
+}
+
+// JoinRoomRequest 进入/创建房间
+message JoinRoomRequest {
+  string player_name = 1;
+}
+
+// JoinRoomResponse 进房响应
+message JoinRoomResponse {
+  ResultCode code    = 1;
+  string     msg     = 2;
+  string     room_id = 3;
+  int32      seat    = 4;
+}
+
+// RollDiceRequest 掷骰
+message RollDiceRequest {}
+
+// BuyRequest 是否购买当前地产
+message BuyRequest {
+  bool buy = 1;
+}
+
+// UpgradeRequest 是否升级当前地产
+message UpgradeRequest {
+  bool upgrade = 1;
+}
+
+// EndTurnRequest 主动结束回合(可选)
+message EndTurnRequest {}
+
+// AckResponse 通用应答
+message AckResponse {
+  ResultCode code = 1;
+  string     msg  = 2;
+}
+
+// RoomInfoRequest 查询当前房间信息(用于状态同步/重连)
+message RoomInfoRequest {}
+
+// RoomInfoResponse 当前房间快照
+message RoomInfoResponse {
+  ResultCode          code         = 1;
+  string              msg          = 2;
+  string              room_id      = 3;
+  RoomState           state        = 4;
+  int32               round        = 5;
+  int32               max_round    = 6;
+  int32               current_seat = 7; // 当前行动座位
+  repeated PlayerInfo players      = 8;
+  repeated TileInfo   tiles        = 9;
+}
+
+// ==================== 推送消息 ====================
+
+// RoomUpdatePush 房间状态更新
+message RoomUpdatePush {
+  string             room_id = 1;
+  repeated PlayerInfo players = 2;
+  int32              need    = 3; // 还需多少人开局
+}
+
+// GameStartPush 游戏开始
+message GameStartPush {
+  string             room_id    = 1;
+  repeated TileInfo   tiles      = 2;
+  repeated PlayerInfo players    = 3;
+  repeated int32     order      = 4; // 行动顺序(座位号)
+  int64              init_money = 5;
+  int32              max_round  = 6;
+}
+
+// TurnStartPush 轮到某玩家行动
+message TurnStartPush {
+  string uid   = 1;
+  int32  seat  = 2;
+  int32  round = 3;
+}
+
+// DiceResultPush 掷骰移动结果
+message DiceResultPush {
+  string uid        = 1;
+  int32  seat       = 2;
+  int32  dice       = 3;
+  int32  from_pos   = 4;
+  int32  to_pos     = 5;
+  bool   pass_start = 6;
+  int64  salary     = 7;
+}
+
+// LandTilePush 落地结算(含可选操作)
+message LandTilePush {
+  string   uid         = 1;
+  int32    pos         = 2;
+  TileType tile_type   = 3;
+  string   tile_name   = 4;
+  bool     can_buy     = 5;
+  bool     can_upgrade = 6;
+  int64    price       = 7; // 购买价 或 升级费
+  int64    money       = 8; // 玩家当前现金
+  int32    level       = 9; // 当前地产等级
+  string   owner_uid   = 10; // 地产所有者(空=无主)
+}
+
+// PropertyChangedPush 买地/升级结果
+message PropertyChangedPush {
+  string         uid       = 1;
+  int32          pos       = 2;
+  string         owner_uid = 3;
+  int32          level     = 4;
+  PropertyAction action    = 5;
+  int64          money     = 6; // 操作后现金
+}
+
+// PayTollPush 支付过路费/税
+message PayTollPush {
+  string from_uid   = 1;
+  string to_uid     = 2; // 空=缴税给系统
+  int64  amount     = 3;
+  int32  pos        = 4;
+  int64  from_money = 5;
+  int64  to_money   = 6;
+  bool   is_tax     = 7; // true=缴税, false=过路费
+}
+
+// CardDrawnPush 抽机会/命运卡
+message CardDrawnPush {
+  string   uid         = 1;
+  CardType card_type   = 2;
+  string   desc        = 3;
+  int64    money_delta = 4;
+  int32    move_to     = 5; // -1=不移动
+  int64    money       = 6; // 操作后现金
+}
+
+// PlayerBankruptPush 玩家破产
+message PlayerBankruptPush {
+  string uid  = 1;
+  int32  seat = 2;
+}
+
+// GameEndPush 对局结束
+message GameEndPush {
+  repeated RankItem rankings    = 1;
+  string           winner_uid   = 2;
+  string           winner_name  = 3;
+  EndReason        reason       = 4;
+}
+
+// ErrorPush 错误推送
+message ErrorPush {
+  ResultCode code = 1;
+  string     msg  = 2;
+}
+
+// ==================== 服务接口(客户端可调用) ====================
+
+// ConnectorService 前端(connector)接口, 客户端直连。
+service ConnectorService {
+  // 路由: connector.login  登录并绑定会话
+  rpc Login(LoginRequest) returns (LoginResponse);
+}
+
+// GameService 后端(game)接口, 客户端经 connector 转发(路由前缀 game.game.*)。
+service GameService {
+  // 路由: game.game.join       进入/创建房间
+  rpc Join(JoinRoomRequest) returns (JoinRoomResponse);
+  // 路由: game.game.rolldice   掷骰
+  rpc RollDice(RollDiceRequest) returns (AckResponse);
+  // 路由: game.game.buy        购买当前地产
+  rpc Buy(BuyRequest) returns (AckResponse);
+  // 路由: game.game.upgrade    升级当前地产
+  rpc Upgrade(UpgradeRequest) returns (AckResponse);
+  // 路由: game.game.endturn    主动结束回合(可选)
+  rpc EndTurn(EndTurnRequest) returns (AckResponse);
+  // 路由: game.game.getroominfo 查询当前房间快照(状态同步/重连)
+  rpc GetRoomInfo(RoomInfoRequest) returns (RoomInfoResponse);
+}
+
+// ==================== 服务端推送(Push)路由一览 ====================
+// 以下为服务器 -> 客户端的推送(非 rpc), route 与消息对应关系:
+//   onRoomUpdate       -> RoomUpdatePush        房间人数/成员变化
+//   onGameStart        -> GameStartPush         游戏开始(地图/玩家/顺序)
+//   onTurnStart        -> TurnStartPush         轮到某玩家行动
+//   onDiceResult       -> DiceResultPush        掷骰移动结果
+//   onLandTile         -> LandTilePush          落地结算(含可选操作)
+//   onPropertyChanged  -> PropertyChangedPush   买地/升级结果
+//   onPayToll          -> PayTollPush           支付过路费/税
+//   onCardDrawn        -> CardDrawnPush          抽机会/命运卡
+//   onPlayerBankrupt   -> PlayerBankruptPush    玩家破产
+//   onGameEnd          -> GameEndPush           对局结束
+//   onError            -> ErrorPush             错误提示
+// =====================================================================
