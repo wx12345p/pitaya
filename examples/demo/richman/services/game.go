@@ -7,10 +7,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/topfreegames/pitaya/v3/examples/demo/richman/game"
-	"github.com/topfreegames/pitaya/v3/examples/demo/richman/protos"
-	pitaya "github.com/topfreegames/pitaya/v3/pkg"
-	"github.com/topfreegames/pitaya/v3/pkg/component"
+	"richman/game"
+	"richman/protos"
+
+	pitaya "github.com/topfreegames/pitaya/v2"
+	"github.com/topfreegames/pitaya/v2/component"
 )
 
 // GameHandler 游戏后端Handler

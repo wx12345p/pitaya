@@ -1,7 +1,9 @@
 # 大富翁10 房间对战游戏 - 策划案 / 需求文档
 
-> 基于 Pitaya 集群模式（工作区内为 `pitaya/v3`）实现的 4 人房间对战大富翁游戏。
+> 基于 **Pitaya v2**（`github.com/topfreegames/pitaya/v2`）集群模式实现的 4 人房间对战大富翁游戏。
 > 采用 connector(前端) / game(后端) 分离架构，全链路 protobuf 序列化，etcd + NATS 集群。
+>
+> **模块说明**：本示例位于 pitaya v3 仓库目录树内，但为一个**独立 Go 模块**（`module richman`，见本目录 `go.mod`），依赖 `pitaya/v2`。因 v2 要求 `go >= 1.25` 而外层仓库 `go.work` 固定较低工具链，构建/运行本示例时须在本目录内并设置 `GOWORK=off`（脱离外层 workspace，使用本模块自带 go.mod 与工具链）。
 
 ---
 
@@ -251,17 +253,20 @@ examples/demo/richman/
 
 ## 7. 运行方式
 
+> 本示例为独立模块(依赖 pitaya/v2, 需 go>=1.25)。所有命令均在 `examples/demo/richman` 目录内、并带上 `GOWORK=off` 前缀执行。
+
 ```bash
 cd examples/demo/richman
-docker compose up -d                       # etcd + nats
-go run main.go -type game -frontend=false -port 3251   # 后端
-go run main.go -type connector -frontend=true -port 3250   # 前端
-go run testclient/main.go                  # 4 玩家自动对局
+docker compose up -d                                        # etcd + nats
+GOWORK=off go run . -type game -frontend=false -port 3251   # 后端
+GOWORK=off go run . -type connector -frontend=true -port 3250   # 前端
+GOWORK=off go run ./testclient                              # 4 玩家自动对局
 ```
 
-也可用 Makefile 目标(在仓库根目录)：
+也可用 Makefile 目标(在仓库根目录, 已内置 `cd` 与 `GOWORK=off`)：
 
 ```bash
+make run-richman-example-localinfra  # 本地 etcd+nats(无 Docker 时)
 make run-richman-example-game        # 后端
 make run-richman-example-connector   # 前端
 make run-richman-example-testclient  # 测试客户端
@@ -270,7 +275,8 @@ make run-richman-example-testclient  # 测试客户端
 无 Docker 环境时, 可用内置的本地基础设施启动器(基于 pitaya 已内置的 nats-server 与嵌入式 etcd, 监听 :4222 / :2379)：
 
 ```bash
-go run ./examples/demo/richman/localinfra   # 替代 docker compose, 前台运行
+cd examples/demo/richman
+GOWORK=off go run ./localinfra   # 替代 docker compose, 前台运行
 ```
 
 ---

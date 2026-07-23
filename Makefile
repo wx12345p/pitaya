@@ -76,14 +76,18 @@ run-cluster-worker-example-metagame:
 run-cluster-worker-example-worker:
 	@cd examples/demo/worker && go run main.go --type worker --frontend=false
 
+# richman 为独立的 pitaya v2 模块, 需 GOWORK=off 并在其目录内运行
 run-richman-example-connector:
-	@go run examples/demo/richman/main.go --type connector --frontend=true --port 3250
+	@cd examples/demo/richman && GOWORK=off go run . --type connector --frontend=true --port 3250
 
 run-richman-example-game:
-	@go run examples/demo/richman/main.go --type game --frontend=false --port 3251
+	@cd examples/demo/richman && GOWORK=off go run . --type game --frontend=false --port 3251
 
 run-richman-example-testclient:
-	@go run examples/demo/richman/testclient/main.go
+	@cd examples/demo/richman && GOWORK=off go run ./testclient
+
+run-richman-example-localinfra:
+	@cd examples/demo/richman && GOWORK=off go run ./localinfra
 
 run-custom-metrics-example:
 	@cd examples/demo/custom_metrics && go run main.go --port 3250
@@ -94,7 +98,7 @@ run-rate-limiting-example:
 protos-compile-demo:
 	@protoc -I examples/demo/protos examples/demo/protos/*.proto --go_out=.
 	@protoc -I examples/demo/landlord/protos examples/demo/landlord/protos/*.proto --go_out=.
-	@protoc -I examples/demo/richman/protos examples/demo/richman/protos/*.proto --go_out=.
+	@protoc -I examples/demo/richman/protos examples/demo/richman/protos/*.proto --go_out=paths=source_relative:examples/demo/richman/protos
 
 protos-compile:
 	@cd benchmark/testdata && ./gen_proto.sh

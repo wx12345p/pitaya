@@ -1,7 +1,7 @@
 syntax = "proto3";
 
 package richman_protos;
-option go_package = "examples/demo/richman/protos";
+option go_package = "richman/protos";
 
 // =====================================================================
 // 大富翁10 房间对战 - 通信协议

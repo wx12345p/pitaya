@@ -5,10 +5,11 @@ import (
 	"log"
 	"strings"
 
+	"richman/protos"
+
 	"github.com/google/uuid"
-	"github.com/topfreegames/pitaya/v3/examples/demo/richman/protos"
-	pitaya "github.com/topfreegames/pitaya/v3/pkg"
-	"github.com/topfreegames/pitaya/v3/pkg/component"
+	pitaya "github.com/topfreegames/pitaya/v2"
+	"github.com/topfreegames/pitaya/v2/component"
 )
 
 // Connector 前端连接器(处理登录/会话绑定)

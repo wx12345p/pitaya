@@ -7,14 +7,15 @@ import (
 	"log"
 	"time"
 
-	"github.com/topfreegames/pitaya/v3/examples/demo/richman/services"
-	pitaya "github.com/topfreegames/pitaya/v3/pkg"
-	"github.com/topfreegames/pitaya/v3/pkg/acceptor"
-	"github.com/topfreegames/pitaya/v3/pkg/cluster"
-	"github.com/topfreegames/pitaya/v3/pkg/config"
-	"github.com/topfreegames/pitaya/v3/pkg/groups"
-	"github.com/topfreegames/pitaya/v3/pkg/route"
-	"github.com/topfreegames/pitaya/v3/pkg/serialize/protobuf"
+	"richman/services"
+
+	pitaya "github.com/topfreegames/pitaya/v2"
+	"github.com/topfreegames/pitaya/v2/acceptor"
+	"github.com/topfreegames/pitaya/v2/cluster"
+	"github.com/topfreegames/pitaya/v2/config"
+	"github.com/topfreegames/pitaya/v2/groups"
+	"github.com/topfreegames/pitaya/v2/route"
+	"github.com/topfreegames/pitaya/v2/serialize/protobuf"
 )
 
 var app pitaya.Pitaya

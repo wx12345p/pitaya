@@ -9,10 +9,11 @@ import (
 	"syscall"
 	"time"
 
+	"richman/protos"
+
 	"github.com/sirupsen/logrus"
-	"github.com/topfreegames/pitaya/v3/examples/demo/richman/protos"
-	"github.com/topfreegames/pitaya/v3/pkg/client"
-	"github.com/topfreegames/pitaya/v3/pkg/conn/message"
+	"github.com/topfreegames/pitaya/v2/client"
+	"github.com/topfreegames/pitaya/v2/conn/message"
 	"google.golang.org/protobuf/proto"
 )
 
