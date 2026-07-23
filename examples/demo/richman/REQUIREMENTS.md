@@ -102,22 +102,31 @@
 
 ## 3. 系统架构
 
+多节点集群：`connector`(N，接入) + `lobby`(1，全局匹配) + `game`(N，对局)。房间按 `roomId` 用 rendezvous 哈希在建房时选定 owner game 节点，owner 写入 session，`game.*` 请求按 session 粘性路由到 owner。
+
 ```mermaid
 flowchart TB
-    C["Go TestClient x4"] -->|TCP :3250| CN["connector (frontend)"]
-    CN -->|"AddRoute(game) + NATS RPC"| GM["game (backend)"]
-    GM -->|"GroupBroadcast / SendPushToUsers 经 connector"| CN
+    C["Go TestClient x4"] -->|"TCP :3250 / :3260"| CN["connector x N (frontend)"]
+    CN -->|"lobby.lobby.join (单实例默认路由)"| LB["lobby (backend, 匹配)"]
+    LB -->|"Set roomId+gameServer, PushToFront"| CN
+    LB -->|"满员: RPCTo(owner) createroom"| GM["game x N (backend, 对局)"]
+    CN -->|"game.* 按 session.gameServer 粘性路由"| GM
+    GM -->|"SendPushToUsers 经 connector(NATS 用户主题)"| CN
     CN -->|s.Push| C
     CN --- ETCD[(etcd :2379)]
+    LB --- ETCD
     GM --- ETCD
     CN --- NATS[(NATS :4222)]
+    LB --- NATS
     GM --- NATS
 ```
 
-- **connector（frontend）**：TCP 接入、`connector.login` 登录、`s.Bind(uid)` 绑定会话、`AddRoute("game")` 转发。
-- **game（backend）**：房间管理、游戏状态机、`GroupCreate(roomId)` + `GroupBroadcast` 房间广播、`SendPushToUsers` 私有推送（如各自手牌/资产）。
-- **序列化**：前后端 `builder.Serializer = protobuf.NewSerializer()`，所有消息为 `proto.Message`。
-- **集群**：服务发现 etcd，RPC 传输 NATS（默认 Builder 自动装配）。
+- **connector（frontend, N 台）**：TCP 接入、`connector.login` 登录 `s.Bind(uid)`；`AddRoute("game")` 粘性路由——直接读 `session.gameServer` 取对应 game 节点（不在路由时现算哈希，避免多 connector 视图不一致）。
+- **lobby（backend）**：全局匹配，分配 `roomId` + 座位；建房时用 `routing.OwnerServerID`（rendezvous 哈希）选定 owner game 节点；把 `roomId`/`gameServer` 写入玩家 session 并 `PushToFront`；满员后经内部 RPC `game.gameremote.createroom` 通知 owner 建房开局；等待期推送 `onRoomUpdate`。**扩容**：启用 Redis 时匹配走共享队列(Lua 原子撮合)，lobby 无本地状态、可水平多副本；`-redis` 为空时退化为单实例内存匹配。
+- **game（backend, N 台）**：仅持有本节点 owner 的房间（`RoomManager` 内存态）、游戏状态机；开局后的所有推送经 `SendPushToUsers` 按 uid 回推（跨 connector 由 NATS 用户主题保证）。
+- **房间放置 vs 查找**：哈希只用于建房时“选一次”owner；查找一律读 session 存的 owner。owner 随 session 固定，节点增减不影响已有房间路由。
+- **序列化**：三类型均 `builder.Serializer = protobuf.NewSerializer()`，所有消息为 `proto.Message`。
+- **集群**：服务发现 etcd，RPC 传输 NATS（默认 Builder 自动装配）；uid→connector 推送靠 NATS 用户主题，无需 BindingStorage。
 
 ---
 
@@ -125,13 +134,17 @@ flowchart TB
 
 路由约定：`{svType}.{component}.{method}`，方法名小写。
 
-协议在 [protos/richman.proto](protos/richman.proto) 中用 `service` 正式描述客户端可调用接口（`ConnectorService` / `GameService`），并用枚举替代裸整型：`ResultCode`、`TileType`、`CardType`、`RoomState`、`EndReason`、`PropertyAction`。注：Pitaya 的 handler 路由在 Go 代码里注册，proto 的 `service` 仅作接口契约文档；用 `protoc --go_out` 生成时不产生 gRPC 桩，不影响运行。
+协议在 [protos/richman.proto](protos/richman.proto) 中用 `service` 正式描述客户端可调用接口（`ConnectorService` / `LobbyService` / `GameService`），并用枚举替代裸整型：`ResultCode`、`TileType`、`CardType`、`RoomState`、`EndReason`、`PropertyAction`。注：Pitaya 的 handler 路由在 Go 代码里注册，proto 的 `service` 仅作接口契约文档；用 `protoc --go_out` 生成时不产生 gRPC 桩，不影响运行。
+
+服务器间内部 RPC（非客户端可见）：`game.gameremote.createroom`，参数 `CreateRoomRequest{roomId, members[]}`，由 lobby 满员后调用 owner game 节点建房。
+
+**前置约定**：`game.*` 按 `session.gameServer` 粘性路由，客户端必须在收到 `lobby.join` 响应（或后续 `onGameStart` 推送）之后再发起 `game.*`；此前 session 无 gameServer，路由会拒绝。断线重连会得到无 gameServer 的新 session，Phase 1 不支持恢复（见后续 Redis 抗宕机增强）。
 
 ### 4.1 请求（Request，client → server）
 | 路由 | 请求 | 响应 | 说明 |
 | --- | --- | --- | --- |
 | `connector.login` | `LoginRequest{playerName}` | `LoginResponse{code,uid,msg}` | 登录并绑定会话 |
-| `game.game.join` | `JoinRoomRequest{}` | `JoinRoomResponse{code,roomId,seat}` | 进入/创建房间 |
+| `lobby.lobby.join` | `JoinRoomRequest{playerName}` | `JoinRoomResponse{code,roomId,seat}` | 匹配进房(经 lobby，写入 session.gameServer) |
 | `game.game.rolldice` | `RollDiceRequest{}` | `AckResponse{code,msg}` | 掷骰 |
 | `game.game.buy` | `BuyRequest{buy}` | `AckResponse{code,msg}` | 购买当前地产 |
 | `game.game.upgrade` | `UpgradeRequest{upgrade}` | `AckResponse{code,msg}` | 升级当前地产 |
@@ -228,20 +241,26 @@ sequenceDiagram
 examples/demo/richman/
 ├── REQUIREMENTS.md          # 本文档
 ├── docker-compose.yml       # etcd + nats
-├── main.go                  # 支持 -type/-frontend/-port，集群 Builder + protobuf serializer
+├── main.go                  # 支持 -type(connector/lobby/game)/-frontend/-port；connector 装配粘性路由
 ├── protos/
-│   ├── richman.proto        # 协议定义
-│   └── richman.pb.go        # 生成/手写的 pb 代码
+│   ├── richman.proto        # 协议定义(含 LobbyService 与内部 CreateRoomRequest)
+│   └── richman.pb.go        # 生成的 pb 代码
+├── routing/
+│   └── owner.go             # rendezvous 哈希: roomId -> owner game 节点(仅建房/重指派时选)
+├── store/
+│   └── redis.go             # Redis 目录 + 快照 + 恢复锁 + 共享匹配队列(Lua 原子撮合)
 ├── services/
 │   ├── connector.go         # frontend：login + 会话绑定
-│   └── game.go              # backend：房间 handler + RoomManager + 推送
+│   ├── lobby.go             # backend(单实例)：全局匹配 + 分配 owner + 建房 + ResolveOwner 恢复
+│   └── game.go              # backend：对局 handler + GameRemote(CreateRoom/RestoreRoom) + 推送 + 快照
 ├── game/
 │   ├── map.go               # 20 格环形地图
 │   ├── tile.go              # 格子类型与地产逻辑
 │   ├── player.go            # 玩家资产/位置/破产状态
 │   ├── dice.go              # 掷骰
 │   ├── card.go              # 机会/命运卡
-│   ├── manager.go           # 房间管理器(匹配/查找)
+│   ├── manager.go           # 房间管理器(按 roomId 建房/恢复/查找, 本节点内存)
+│   ├── snapshot.go          # (Phase 2)房间快照 ToSnapshot/RestoreRoom/Resume
 │   └── room.go              # 房间状态机 + 回合轮转 + 结算 + 超时
 ├── testclient/
 │   └── main.go              # 4 玩家自动化对局客户端
@@ -257,19 +276,26 @@ examples/demo/richman/
 
 ```bash
 cd examples/demo/richman
-docker compose up -d                                        # etcd + nats
-GOWORK=off go run . -type game -frontend=false -port 3251   # 后端
-GOWORK=off go run . -type connector -frontend=true -port 3250   # 前端
-GOWORK=off go run ./testclient                              # 4 玩家自动对局
+docker compose up -d                                             # etcd + nats
+# 多节点集群: 1 lobby + 2 game + 2 connector(各自独立终端)
+GOWORK=off go run . -type lobby     -frontend=false -port 3252   # 匹配(单实例)
+GOWORK=off go run . -type game      -frontend=false -port 3251   # 对局节点1
+GOWORK=off go run . -type game      -frontend=false -port 3253   # 对局节点2
+GOWORK=off go run . -type connector -frontend=true  -port 3250   # 接入1
+GOWORK=off go run . -type connector -frontend=true  -port 3260   # 接入2
+GOWORK=off go run ./testclient                                   # 4 玩家(轮流连 3250/3260)
 ```
 
 也可用 Makefile 目标(在仓库根目录, 已内置 `cd` 与 `GOWORK=off`)：
 
 ```bash
-make run-richman-example-localinfra  # 本地 etcd+nats(无 Docker 时)
-make run-richman-example-game        # 后端
-make run-richman-example-connector   # 前端
-make run-richman-example-testclient  # 测试客户端
+make run-richman-example-localinfra   # 本地 etcd+nats(无 Docker 时)
+make run-richman-example-lobby        # 匹配(单实例)
+make run-richman-example-game         # 对局节点1 (:3251)
+make run-richman-example-game2        # 对局节点2 (:3253)
+make run-richman-example-connector    # 接入1 (:3250)
+make run-richman-example-connector2   # 接入2 (:3260)
+make run-richman-example-testclient   # 测试客户端
 ```
 
 无 Docker 环境时, 可用内置的本地基础设施启动器(基于 pitaya 已内置的 nats-server 与嵌入式 etcd, 监听 :4222 / :2379)：
@@ -281,8 +307,21 @@ GOWORK=off go run ./localinfra   # 替代 docker compose, 前台运行
 
 ---
 
+## 7.1 抗宕机：Redis 快照 + 惰性恢复（Phase 2）
+
+在内存态 + 亲和模型之上叠加, 目标：owner 宕机时把损失从“整局丢失”降到“回退到上一个回合检查点”, 并自动重指派恢复。默认连接 `127.0.0.1:6379`（`-redis` 可改，置空则禁用、退化为 Phase 1）。
+
+- **快照写入(低频)**：每个回合开始时(回合边界)异步写 `RoomSnapshot` 到 Redis；优雅关机(SIGTERM)时 `app.Start()` 返回后对本节点全部房间再 flush 一次。
+- **目录**：`richman:room:{roomId}:owner` 记录 owner；lobby 建房与恢复时写入。
+- **惰性恢复**：connector 路由发现 `session.gameServer` 不在存活节点中 → RPC `lobby.lobbyremote.resolveowner`；lobby 读目录，owner 仍存活则直接返回，否则 `SETNX` 抢恢复锁 → rendezvous 在存活节点重选 newOwner → `RPCTo(newOwner, game.gameremote.restoreroom)` 从 Redis 快照 `RestoreRoom` 并续跑 → 更新目录 → connector 本地改写 `session.gameServer` 并路由过去。恢复后 game 向房间玩家重推 `onGameStart` 以 resync。
+- **RPO**：= 回合快照间隔；崩溃丢失“上次快照之后”的该回合操作(由 `onTurnStart` 续跑重做)。优雅关机因末尾 flush 近似无损。
+- **键 TTL**：快照/目录 30 分钟, 恢复锁 10 秒(防并发双恢复)。
+- **本地基础设施**：`localinfra` 内嵌 miniredis(:6379)；docker-compose 亦含 redis 服务。
+
 ## 8. 风险与注意点
 - 启用 protobuf serializer 后，**所有** handler 参数/返回值（含 login）必须是 `proto.Message`，不能沿用斗地主示例的 JSON struct。
-- 生成 `richman.pb.go` 需本地 `protoc` + `protoc-gen-go`；若缺失则手写等价 pb 代码兜底。
-- MVP 为单 game 后端实例 + `MemoryGroupService`；多实例房间分片需换 `EtcdGroupService` + 按 roomId 路由（后续扩展）。
+- 生成 `richman.pb.go` 需本地 `protoc` + `protoc-gen-go`。
+- 房间状态为 game 节点内存态：owner 宕机则该房间丢失（Phase 2 用 Redis 快照 + 惰性恢复缓解）。
+- lobby 启用 Redis 后可水平扩容(共享匹配队列 + Lua 原子撮合)；未启用 Redis 时为单实例内存匹配(SPOF)。同一时刻仅一个"开放房间"按序凑满 4 人。
 - 回合超时依赖服务端定时器，需在房间销毁时正确停止 timer，避免 goroutine 泄漏。
+- 推送按 uid 经 NATS 用户主题回推，天然支持多 connector；未使用 Group 广播，故无需 `EtcdGroupService`。

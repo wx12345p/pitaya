@@ -4,11 +4,11 @@ import (
 	"context"
 	"log"
 	"strings"
-	"sync"
 	"time"
 
 	"richman/game"
 	"richman/protos"
+	"richman/store"
 
 	pitaya "github.com/topfreegames/pitaya/v2"
 	"github.com/topfreegames/pitaya/v2/component"
@@ -19,12 +19,26 @@ type GameHandler struct {
 	component.Base
 	app         pitaya.Pitaya
 	roomManager *game.RoomManager
-	playerRooms sync.Map // uid -> roomID
+	store       *store.RedisStore // 可为 nil(未启用 Redis 时退化为无快照)
 }
 
 // NewGameHandler 创建游戏Handler
-func NewGameHandler(app pitaya.Pitaya) *GameHandler {
-	return &GameHandler{app: app, roomManager: game.NewRoomManager()}
+func NewGameHandler(app pitaya.Pitaya, st *store.RedisStore) *GameHandler {
+	return &GameHandler{app: app, roomManager: game.NewRoomManager(), store: st}
+}
+
+// FlushAll 将本节点所有房间快照写入 Redis(优雅关机时调用)
+func (h *GameHandler) FlushAll() {
+	if h.store == nil {
+		return
+	}
+	rooms := h.roomManager.Rooms()
+	for _, room := range rooms {
+		if err := h.store.SaveSnapshot(context.Background(), room.ToSnapshot()); err != nil {
+			log.Printf("[GameHandler] 关机快照失败 room=%s: %v", room.ID, err)
+		}
+	}
+	log.Printf("[GameHandler] 关机 flush 完成, 房间数 %d", len(rooms))
 }
 
 // Init 初始化
@@ -32,35 +46,51 @@ func (h *GameHandler) Init() {
 	log.Println("[GameHandler] 初始化完成")
 }
 
-// ==================== Handler: 客户端请求 ====================
-
-// Join 进入/创建房间
-func (h *GameHandler) Join(ctx context.Context, req *protos.JoinRoomRequest) (*protos.JoinRoomResponse, error) {
-	s := h.app.GetSessionFromCtx(ctx)
-	uid := s.UID()
-	if uid == "" {
-		return &protos.JoinRoomResponse{Code: protos.ResultCode_RESULT_NOT_LOGIN, Msg: "请先登录"}, nil
-	}
-	name := req.PlayerName
-	if name == "" {
-		name = "玩家" + uid[:6]
-	}
-
-	room, seat, full := h.roomManager.JoinOrCreate(uid, name)
-	h.playerRooms.Store(uid, room.ID)
-	if seat == 0 {
-		h.setupRoomCallbacks(room)
-	}
-
-	log.Printf("[GameHandler] 玩家 %s(%s) 加入房间 %s 座位 %d (满员=%v)", name, uid, room.ID, seat, full)
-
-	h.broadcastRoomUpdate(room)
-	if full {
-		go room.StartGame()
-	}
-
-	return &protos.JoinRoomResponse{Code: protos.ResultCode_RESULT_OK, Msg: "已加入房间", RoomId: room.ID, Seat: int32(seat)}, nil
+// GameRemote 游戏后端服务器间RPC(供 lobby 调用建房), 非客户端可见
+type GameRemote struct {
+	component.Base
+	h *GameHandler
 }
+
+// CreateRoom lobby -> game: 按 lobby 分配的 roomId 与花名册建房并开局
+// 路由: game.gameremote.createroom
+func (gr *GameRemote) CreateRoom(ctx context.Context, req *protos.CreateRoomRequest) (*protos.AckResponse, error) {
+	members := make([]game.Member, 0, len(req.Members))
+	for _, m := range req.Members {
+		members = append(members, game.Member{UID: m.Uid, Name: m.Name, Seat: int(m.Seat)})
+	}
+	room := gr.h.roomManager.CreateRoom(req.RoomId, members)
+	gr.h.setupRoomCallbacks(room)
+	log.Printf("[GameRemote] 建房 %s, 成员数 %d, 开局", req.RoomId, len(members))
+	go room.StartGame()
+	return &protos.AckResponse{Code: protos.ResultCode_RESULT_OK, Msg: "ok"}, nil
+}
+
+// RestoreRoom lobby -> game: 从 Redis 快照恢复房间并续跑(故障恢复)
+// 路由: game.gameremote.restoreroom
+func (gr *GameRemote) RestoreRoom(ctx context.Context, req *protos.RestoreRoomRequest) (*protos.AckResponse, error) {
+	h := gr.h
+	if h.store == nil {
+		return &protos.AckResponse{Code: protos.ResultCode_RESULT_ERROR, Msg: "未启用快照"}, nil
+	}
+	if room := h.roomManager.GetRoom(req.RoomId); room != nil {
+		return &protos.AckResponse{Code: protos.ResultCode_RESULT_OK, Msg: "已存在"}, nil
+	}
+	snap, err := h.store.LoadSnapshot(ctx, req.RoomId)
+	if err != nil || snap == nil {
+		log.Printf("[GameRemote] 恢复失败 room=%s: 快照缺失(%v)", req.RoomId, err)
+		return &protos.AckResponse{Code: protos.ResultCode_RESULT_ERROR, Msg: "快照缺失"}, nil
+	}
+	room := h.roomManager.RestoreRoom(*snap)
+	h.setupRoomCallbacks(room)
+	log.Printf("[GameRemote] 恢复房间 %s (回合%d 座位%d), 续跑", req.RoomId, snap.Round, snap.CurrentSeat)
+	// 先向客户端重推全量状态以 resync, 再续跑当前回合
+	h.onGameStart(room)
+	go room.Resume()
+	return &protos.AckResponse{Code: protos.ResultCode_RESULT_OK, Msg: "ok"}, nil
+}
+
+// ==================== Handler: 客户端请求 ====================
 
 // RollDice 掷骰
 func (h *GameHandler) RollDice(ctx context.Context, req *protos.RollDiceRequest) (*protos.AckResponse, error) {
@@ -129,13 +159,18 @@ func (h *GameHandler) GetRoomInfo(ctx context.Context, req *protos.RoomInfoReque
 }
 
 // locate 根据会话定位玩家所在房间与座位
+// 房间 owner 已在匹配阶段写入 session(roomId), 故直接按 roomId 命中本节点房间。
 func (h *GameHandler) locate(ctx context.Context) (int, *game.Room) {
 	s := h.app.GetSessionFromCtx(ctx)
 	uid := s.UID()
 	if uid == "" {
 		return -1, nil
 	}
-	room := h.roomManager.FindRoomByUID(uid)
+	roomID, _ := s.Get("roomId").(string)
+	if roomID == "" {
+		return -1, nil
+	}
+	room := h.roomManager.GetRoom(roomID)
 	if room == nil {
 		return -1, nil
 	}
@@ -198,6 +233,15 @@ func (h *GameHandler) onTurnStart(room *game.Room, seat, round int) {
 		Seat:  int32(seat),
 		Round: int32(round),
 	})
+	// 回合边界checkpoint: 异步写快照到 Redis(低频, 不阻塞对局)
+	if h.store != nil {
+		snap := room.ToSnapshot()
+		go func() {
+			if err := h.store.SaveSnapshot(context.Background(), snap); err != nil {
+				log.Printf("[GameHandler] 快照写入失败 room=%s: %v", snap.RoomID, err)
+			}
+		}()
+	}
 }
 
 func (h *GameHandler) onDiceResult(room *game.Room, seat, dice, from, to int, passStart bool, salary int64) {
@@ -310,9 +354,11 @@ func (h *GameHandler) onGameEnd(room *game.Room, rankings []game.RankResult, win
 		Reason:     endReason,
 	})
 
-	// 清理
-	for _, p := range room.PlayersSnapshot() {
-		h.playerRooms.Delete(p.UID)
+	// 清理: 本地房间 + Redis 目录/快照
+	if h.store != nil {
+		if err := h.store.DeleteRoom(context.Background(), room.ID); err != nil {
+			log.Printf("[GameHandler] 清理 Redis 失败 room=%s: %v", room.ID, err)
+		}
 	}
 	go func() {
 		time.Sleep(3 * time.Second)
@@ -381,11 +427,17 @@ func uidBySeat(room *game.Room, seat int) string {
 	return ""
 }
 
-// RegisterGameServices 注册后端服务
-func RegisterGameServices(app pitaya.Pitaya) {
-	handler := NewGameHandler(app)
+// RegisterGameServices 注册后端服务(客户端 handler + 服务器间 remote)
+// 返回 handler 以便 main 在优雅关机时 flush 快照。
+func RegisterGameServices(app pitaya.Pitaya, st *store.RedisStore) *GameHandler {
+	handler := NewGameHandler(app, st)
 	app.Register(handler,
 		component.WithName("game"),
 		component.WithNameFunc(strings.ToLower),
 	)
+	app.RegisterRemote(&GameRemote{h: handler},
+		component.WithName("gameremote"),
+		component.WithNameFunc(strings.ToLower),
+	)
+	return handler
 }

@@ -17,11 +17,13 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-const serverAddr = "localhost:3250"
+// 多个 connector 地址, 玩家轮流连接, 验证多 connector + 多 game 集群
+var connectorAddrs = []string{"localhost:3250", "localhost:3260"}
 
 // GamePlayer 测试客户端玩家
 type GamePlayer struct {
 	name      string
+	addr      string
 	uid       string
 	seat      int32
 	roomID    string
@@ -60,7 +62,8 @@ func main() {
 	}
 
 	var wg sync.WaitGroup
-	for _, p := range players {
+	for i, p := range players {
+		p.addr = connectorAddrs[i%len(connectorAddrs)]
 		wg.Add(1)
 		go func(player *GamePlayer) {
 			defer wg.Done()
@@ -92,11 +95,11 @@ func runPlayer(player *GamePlayer) error {
 	c := client.New(logrus.WarnLevel, 10*time.Second)
 	player.client = c
 
-	if err := c.ConnectTo(serverAddr); err != nil {
+	if err := c.ConnectTo(player.addr); err != nil {
 		return fmt.Errorf("连接失败: %v", err)
 	}
 	player.connected = true
-	log.Printf("[%s] 已连接", player.name)
+	log.Printf("[%s] 已连接 (%s)", player.name, player.addr)
 
 	go handleMessages(player)
 	time.Sleep(200 * time.Millisecond)
@@ -109,9 +112,23 @@ func runPlayer(player *GamePlayer) error {
 		return fmt.Errorf("登录超时")
 	}
 
-	// 进房
+	// 匹配进房(经 lobby, 之后 game.* 按 session.gameServer 粘性路由)
 	joinReq, _ := proto.Marshal(&protos.JoinRoomRequest{PlayerName: player.name})
-	player.send("game.game.join", joinReq)
+	player.send("lobby.lobby.join", joinReq)
+
+	// 周期性 getroominfo 心跳: 正常时用于状态同步; owner 宕机时驱动 connector 触发惰性恢复
+	go func() {
+		for player.connected {
+			time.Sleep(3 * time.Second)
+			player.mu.Lock()
+			rid := player.roomID
+			player.mu.Unlock()
+			if rid != "" {
+				req, _ := proto.Marshal(&protos.RoomInfoRequest{})
+				player.send("game.game.getroominfo", req)
+			}
+		}
+	}()
 
 	for player.connected {
 		time.Sleep(500 * time.Millisecond)
@@ -149,7 +166,7 @@ func handleResponse(player *GamePlayer, msg *message.Message) {
 		} else {
 			log.Printf("[%s] 登录失败: %s", player.name, resp.Msg)
 		}
-	case "game.game.join":
+	case "lobby.lobby.join":
 		var resp protos.JoinRoomResponse
 		proto.Unmarshal(msg.Data, &resp)
 		if resp.Code == protos.ResultCode_RESULT_OK {
@@ -157,7 +174,7 @@ func handleResponse(player *GamePlayer, msg *message.Message) {
 			player.roomID = resp.RoomId
 			player.seat = resp.Seat
 			player.mu.Unlock()
-			log.Printf("[%s] 进入房间 %s 座位 %d", player.name, resp.RoomId, resp.Seat)
+			log.Printf("[%s] 匹配进入房间 %s 座位 %d", player.name, resp.RoomId, resp.Seat)
 		} else {
 			log.Printf("[%s] 进房失败: %s", player.name, resp.Msg)
 		}

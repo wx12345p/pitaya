@@ -157,6 +157,69 @@ message RoomInfoResponse {
   repeated TileInfo   tiles        = 9;
 }
 
+// ==================== 服务器间 RPC(内部, 非客户端可见) ====================
+
+// RoomMember 房间成员(lobby 匹配结果, 用于通知 game 建房)
+message RoomMember {
+  string uid  = 1;
+  string name = 2;
+  int32  seat = 3;
+}
+
+// CreateRoomRequest lobby -> game: 满员后请求 owner game 节点按指定 roomId 建房并开局
+message CreateRoomRequest {
+  string              room_id = 1;
+  repeated RoomMember members = 2;
+}
+
+// ---- Phase 2: 快照与故障恢复 ----
+
+// PlayerState 玩家状态快照
+message PlayerState {
+  string uid      = 1;
+  string name     = 2;
+  int32  seat     = 3;
+  int64  money    = 4;
+  int32  pos      = 5;
+  bool   bankrupt = 6;
+  bool   is_ai    = 7;
+}
+
+// TileState 地块动态状态快照(归属/等级; 地图布局固定, 无需持久化)
+message TileState {
+  int32  index     = 1;
+  string owner_uid = 2;
+  int32  level     = 3;
+}
+
+// RoomSnapshot 房间状态快照(回合边界写入 Redis, 用于宕机恢复)
+message RoomSnapshot {
+  string               room_id      = 1;
+  int32                state        = 2; // RoomState
+  int32                round        = 3;
+  int32                turns_taken  = 4;
+  int32                current_seat = 5;
+  repeated PlayerState players      = 6;
+  repeated TileState   tiles        = 7;
+}
+
+// ResolveOwnerRequest connector -> lobby: 查询/重指派 roomId 的 owner game 节点
+message ResolveOwnerRequest {
+  string room_id = 1;
+}
+
+// ResolveOwnerResponse lobby -> connector: 返回当前(可能新指派的)owner
+message ResolveOwnerResponse {
+  ResultCode code  = 1;
+  string     msg   = 2;
+  string     owner = 3;
+}
+
+// RestoreRoomRequest lobby -> game: 请求 owner 从 Redis 快照恢复房间
+message RestoreRoomRequest {
+  string room_id = 1;
+}
+
 // ==================== 推送消息 ====================
 
 // RoomUpdatePush 房间状态更新
@@ -267,10 +330,17 @@ service ConnectorService {
   rpc Login(LoginRequest) returns (LoginResponse);
 }
 
-// GameService 后端(game)接口, 客户端经 connector 转发(路由前缀 game.game.*)。
-service GameService {
-  // 路由: game.game.join       进入/创建房间
+// LobbyService 匹配(lobby)接口, 客户端经 connector 转发(路由前缀 lobby.lobby.*)。
+// lobby 为单实例, 负责全局匹配、分配 roomId+座位, 并把 owner game 节点写入 session。
+service LobbyService {
+  // 路由: lobby.lobby.join  匹配进入房间(替代原 game.game.join)
   rpc Join(JoinRoomRequest) returns (JoinRoomResponse);
+}
+
+// GameService 后端(game)接口, 客户端经 connector 转发(路由前缀 game.game.*)。
+// 说明: 进房改由 LobbyService.Join 完成; game 侧的建房由 lobby 通过内部 RPC
+//       (game.gameremote.createroom, 参数 CreateRoomRequest) 触发, 非客户端可调用。
+service GameService {
   // 路由: game.game.rolldice   掷骰
   rpc RollDice(RollDiceRequest) returns (AckResponse);
   // 路由: game.game.buy        购买当前地产

@@ -5,8 +5,6 @@ import (
 	"sort"
 	"sync"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 // RoomState 房间状态
@@ -84,16 +82,22 @@ type Room struct {
 	OnGameEnd         func(r *Room, rankings []RankResult, winnerUID, winnerName, reason string)
 }
 
-// NewRoom 创建房间
-func NewRoom() *Room {
-	return &Room{
-		ID:          uuid.New().String()[:8],
+// NewRoomWithID 按指定 roomID 与成员创建房间(roomId 由 lobby 分配)
+func NewRoomWithID(roomID string, members []Member) *Room {
+	r := &Room{
+		ID:          roomID,
 		State:       StateWaiting,
 		Board:       NewBoard(),
 		Players:     make([]*Player, MaxPlayers),
 		CurrentSeat: 0,
 		phase:       phaseIdle,
 	}
+	for _, m := range members {
+		if m.Seat >= 0 && m.Seat < MaxPlayers {
+			r.Players[m.Seat] = &Player{UID: m.UID, Name: m.Name, Seat: m.Seat, Money: InitMoney}
+		}
+	}
+	return r
 }
 
 // ==================== 只读快照(线程安全) ====================

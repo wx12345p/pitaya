@@ -3,8 +3,10 @@ module richman
 go 1.25.0
 
 require (
+	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/google/uuid v1.6.0
 	github.com/nats-io/nats-server/v2 v2.10.18
+	github.com/redis/go-redis/v9 v9.21.0
 	github.com/sirupsen/logrus v1.9.3
 	github.com/topfreegames/pitaya/v2 v2.11.24
 	go.etcd.io/etcd/server/v3 v3.5.11
@@ -18,7 +20,7 @@ require (
 	github.com/bitly/go-simplejson v0.5.1 // indirect
 	github.com/bufbuild/protocompile v0.4.0 // indirect
 	github.com/cenkalti/backoff/v4 v4.2.1 // indirect
-	github.com/cespare/xxhash/v2 v2.2.0 // indirect
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/coreos/go-semver v0.3.1 // indirect
 	github.com/coreos/go-systemd/v22 v22.5.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
@@ -72,6 +74,7 @@ require (
 	github.com/tmc/grpc-websocket-proxy v0.0.0-20201229170055-e5319fda7802 // indirect
 	github.com/topfreegames/go-workers v1.2.1 // indirect
 	github.com/xiang90/probing v0.0.0-20190116061207-43a291ad63a2 // indirect
+	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.etcd.io/bbolt v1.3.8 // indirect
 	go.etcd.io/etcd/api/v3 v3.5.11 // indirect
 	go.etcd.io/etcd/client/pkg/v3 v3.5.11 // indirect

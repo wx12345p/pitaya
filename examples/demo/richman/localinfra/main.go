@@ -1,4 +1,4 @@
-// Command localinfra 启动本地测试用的 etcd(:2379) 与 NATS(:4222)。
+// Command localinfra 启动本地测试用的 etcd(:2379)、NATS(:4222) 与 Redis(:6379)。
 // 适用于没有 docker 的环境, 便于本地联调 richman 示例。
 package main
 
@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"go.etcd.io/etcd/server/v3/embed"
 )
@@ -26,6 +27,14 @@ func main() {
 		log.Fatal("NATS 启动超时")
 	}
 	log.Println("NATS 已启动: nats://127.0.0.1:4222")
+
+	// 启动内嵌 Redis(miniredis, 监听固定端口 :6379)
+	mr := miniredis.NewMiniRedis()
+	if err := mr.StartAddr("127.0.0.1:6379"); err != nil {
+		log.Fatalf("启动 miniredis 失败: %v", err)
+	}
+	defer mr.Close()
+	log.Println("Redis 已启动: 127.0.0.1:6379 (miniredis)")
 
 	// 启动嵌入式 etcd
 	dir, err := os.MkdirTemp("", "richman-etcd-")

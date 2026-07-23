@@ -77,11 +77,24 @@ run-cluster-worker-example-worker:
 	@cd examples/demo/worker && go run main.go --type worker --frontend=false
 
 # richman 为独立的 pitaya v2 模块, 需 GOWORK=off 并在其目录内运行
+# 多节点集群: 1 lobby(匹配) + N game(对局) + N connector(接入)
+run-richman-example-lobby:
+	@cd examples/demo/richman && GOWORK=off go run . --type lobby --frontend=false --port 3252
+
+run-richman-example-lobby2:
+	@cd examples/demo/richman && GOWORK=off go run . --type lobby --frontend=false --port 3254
+
 run-richman-example-connector:
 	@cd examples/demo/richman && GOWORK=off go run . --type connector --frontend=true --port 3250
 
+run-richman-example-connector2:
+	@cd examples/demo/richman && GOWORK=off go run . --type connector --frontend=true --port 3260
+
 run-richman-example-game:
 	@cd examples/demo/richman && GOWORK=off go run . --type game --frontend=false --port 3251
+
+run-richman-example-game2:
+	@cd examples/demo/richman && GOWORK=off go run . --type game --frontend=false --port 3253
 
 run-richman-example-testclient:
 	@cd examples/demo/richman && GOWORK=off go run ./testclient

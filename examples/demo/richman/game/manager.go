@@ -7,11 +7,17 @@ import (
 
 var errBadTurn = errors.New("不是你的操作回合或状态不允许")
 
-// RoomManager 房间管理器(内存)
+// Member 建房成员(由 lobby 匹配后传入)
+type Member struct {
+	UID  string
+	Name string
+	Seat int
+}
+
+// RoomManager 房间管理器(单节点内存, 仅持有本节点 owner 的房间)
 type RoomManager struct {
-	mu       sync.RWMutex
-	rooms    map[string]*Room
-	waitRoom *Room // 当前等待匹配的房间
+	mu    sync.RWMutex
+	rooms map[string]*Room
 }
 
 // NewRoomManager 创建房间管理器
@@ -26,7 +32,7 @@ func (rm *RoomManager) GetRoom(id string) *Room {
 	return rm.rooms[id]
 }
 
-// FindRoomByUID 根据玩家UID查找房间
+// FindRoomByUID 根据玩家UID查找房间(本节点范围内)
 func (rm *RoomManager) FindRoomByUID(uid string) *Room {
 	rm.mu.RLock()
 	defer rm.mu.RUnlock()
@@ -38,58 +44,44 @@ func (rm *RoomManager) FindRoomByUID(uid string) *Room {
 	return nil
 }
 
-// JoinOrCreate 加入或创建房间, 返回房间/座位/是否满员
-func (rm *RoomManager) JoinOrCreate(uid, name string) (*Room, int, bool) {
+// CreateRoom 按指定 roomID 与成员建房(幂等: 已存在则直接返回)
+func (rm *RoomManager) CreateRoom(roomID string, members []Member) *Room {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
-
-	// 已在房间则直接返回
-	for _, room := range rm.rooms {
-		if seat := room.GetSeatByUID(uid); seat >= 0 {
-			return room, seat, room.PlayerCount() >= MaxPlayers
-		}
+	if r, ok := rm.rooms[roomID]; ok {
+		return r
 	}
+	r := NewRoomWithID(roomID, members)
+	rm.rooms[roomID] = r
+	return r
+}
 
-	// 加入等待房间
-	if rm.waitRoom != nil && rm.waitRoom.State == StateWaiting {
-		room := rm.waitRoom
-		seat := room.addPlayer(uid, name)
-		if seat >= 0 {
-			full := room.PlayerCount() >= MaxPlayers
-			if full {
-				rm.waitRoom = nil
-			}
-			return room, seat, full
-		}
+// RestoreRoom 由快照重建房间并登记(幂等: 已存在则直接返回)
+func (rm *RoomManager) RestoreRoom(snap Snapshot) *Room {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+	if r, ok := rm.rooms[snap.RoomID]; ok {
+		return r
 	}
-
-	// 创建新房间
-	room := NewRoom()
-	seat := room.addPlayer(uid, name)
-	rm.rooms[room.ID] = room
-	rm.waitRoom = room
-	return room, seat, room.PlayerCount() >= MaxPlayers
+	r := roomFromSnapshot(snap)
+	rm.rooms[snap.RoomID] = r
+	return r
 }
 
 // RemoveRoom 删除房间
 func (rm *RoomManager) RemoveRoom(id string) {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
-	if rm.waitRoom != nil && rm.waitRoom.ID == id {
-		rm.waitRoom = nil
-	}
 	delete(rm.rooms, id)
 }
 
-// addPlayer 在空座位放入玩家, 返回座位号(-1=无空位)
-func (r *Room) addPlayer(uid, name string) int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for i, p := range r.Players {
-		if p == nil {
-			r.Players[i] = &Player{UID: uid, Name: name, Seat: i, Money: InitMoney}
-			return i
-		}
+// Rooms 返回本节点当前所有房间(用于优雅关机快照)
+func (rm *RoomManager) Rooms() []*Room {
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
+	res := make([]*Room, 0, len(rm.rooms))
+	for _, r := range rm.rooms {
+		res = append(res, r)
 	}
-	return -1
+	return res
 }
