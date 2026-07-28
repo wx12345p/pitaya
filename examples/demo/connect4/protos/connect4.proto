@@ -1,0 +1,403 @@
+syntax = "proto3";
+
+package connect4_protos;
+option go_package = "connect4/protos";
+
+// =====================================================================
+// 四子棋(Connect 4) 房间对战 - 通信协议
+//
+// 说明: Pitaya 的 handler 路由在 Go 代码中注册, 下方 service 仅用于正式
+//       描述"客户端可调用的接口"(请求/响应)。服务端到客户端的推送(Push)
+//       不走 rpc, 统一在文件末尾用注释列出路由与消息的对应关系。
+//
+// 棋盘坐标约定: 7 列 x 6 行, col ∈ [0,6] 自左向右, row ∈ [0,5] 自下向上,
+//       row=0 为最底行。棋子落入所选列的最低空行, 行号由服务端计算。
+// =====================================================================
+
+// ==================== 枚举 ====================
+
+// ResultCode 通用结果码
+enum ResultCode {
+  RESULT_OK = 0;             // 成功
+  RESULT_ERROR = 1;          // 通用错误
+  RESULT_NOT_LOGIN = 2;      // 未登录
+  RESULT_NOT_IN_ROOM = 3;    // 不在房间中
+  RESULT_BAD_TURN = 4;       // 非本方回合或状态不允许
+  RESULT_ROOM_NOT_FOUND = 5; // 房间不存在
+  RESULT_COL_FULL = 6;       // 该列已满
+  RESULT_BAD_COL = 7;        // 列号非法
+}
+
+// RoomState 房间状态
+enum RoomState {
+  ROOM_WAITING = 0; // 等待开局
+  ROOM_PLAYING = 1; // 对局中
+  ROOM_OVER = 2;    // 已结束
+}
+
+// Piece 棋子颜色(亦为格子取值)
+enum Piece {
+  PIECE_EMPTY = 0;  // 空格
+  PIECE_RED = 1;    // 红子(座位0)
+  PIECE_YELLOW = 2; // 黄子(座位1)
+}
+
+// PlayerRole 客户端在房间中的角色
+enum PlayerRole {
+  ROLE_PLAYER = 0;    // 对局玩家
+  ROLE_SPECTATOR = 1; // 观战者
+}
+
+// EndReason 对局结束原因
+enum EndReason {
+  END_UNKNOWN = 0;    // 未知
+  END_CONNECT4 = 1;   // 连成四子
+  END_DRAW_FULL = 2;  // 棋盘填满, 平局
+  END_TIMEOUT = 3;    // 超时次数超限判负
+  END_DISCONNECT = 4; // 断线超过宽限期判负
+}
+
+// MatchState 匹配状态
+enum MatchState {
+  MATCH_QUEUING = 0;   // 队列中等待对手
+  MATCH_MATCHED = 1;   // 已匹配到真人对手
+  MATCH_AI_FILLED = 2; // 等待超时, 由 AI 补位
+}
+
+// ==================== 公共结构 ====================
+
+// PlayerInfo 玩家信息
+message PlayerInfo {
+  string uid           = 1;
+  string name          = 2;
+  int32  seat          = 3; // 0=先手红, 1=后手黄
+  Piece  piece         = 4;
+  bool   is_ai         = 5;
+  bool   online        = 6;
+  int32  timeout_count = 7; // 已超时次数
+}
+
+// Cell 棋盘坐标
+message Cell {
+  int32 col = 1;
+  int32 row = 2;
+}
+
+// BoardState 棋盘全量状态
+// cells 长度为 cols*rows, 下标 index = row*cols + col, 取值为 Piece 枚举值。
+message BoardState {
+  int32 cols  = 1;
+  int32 rows  = 2;
+  bytes cells = 3;
+}
+
+// RoomBrief 房间摘要(观战列表用)
+message RoomBrief {
+  string              room_id    = 1;
+  repeated PlayerInfo players    = 2;
+  int32               move_no    = 3; // 已落子步数
+  int32               spectators = 4; // 观战人数
+  int64               started_at = 5; // 开局时间(unix 秒)
+}
+
+// ==================== 请求 / 响应 ====================
+
+// LoginRequest 登录请求
+// last_uid 非空且服务端身份仍有效时复用同一 uid(断线重连的身份续接)。
+message LoginRequest {
+  string player_name = 1;
+  string last_uid    = 2;
+}
+
+// LoginResponse 登录响应
+message LoginResponse {
+  ResultCode code    = 1;
+  string     msg     = 2;
+  string     uid     = 3;
+  string     name    = 4;
+  bool       resumed = 5; // true=复用了 last_uid
+}
+
+// MatchRequest 请求匹配对手
+message MatchRequest {}
+
+// MatchResponse 匹配响应
+// matched=false 表示已入队等待, 满员/AI 补位后通过 onGameStart 推送开局。
+message MatchResponse {
+  ResultCode code    = 1;
+  string     msg     = 2;
+  string     room_id = 3;
+  int32      seat    = 4;
+  bool       matched = 5;
+  bool       with_ai = 6; // 本局对手为 AI
+}
+
+// CancelMatchRequest 取消匹配(仅在队列中有效)
+message CancelMatchRequest {}
+
+// ReconnectRequest 断线重连: 按 uid 反查在局房间并重建粘性路由
+message ReconnectRequest {}
+
+// ReconnectResponse 重连响应
+message ReconnectResponse {
+  ResultCode code    = 1;
+  string     msg     = 2;
+  string     room_id = 3;
+  int32      seat    = 4;
+  PlayerRole role    = 5;
+}
+
+// RoomListRequest 查询可观战房间列表
+message RoomListRequest {
+  int32 limit = 1; // 0=默认 20
+}
+
+// RoomListResponse 可观战房间列表
+message RoomListResponse {
+  ResultCode         code  = 1;
+  string             msg   = 2;
+  repeated RoomBrief rooms = 3;
+}
+
+// SpectateRequest 请求观战指定房间(成功后再发 game.game.watch 注册)
+message SpectateRequest {
+  string room_id = 1;
+}
+
+// DropRequest 落子(只需列号, 行号由服务端计算)
+message DropRequest {
+  int32 col = 1;
+}
+
+// WatchRequest 注册为观战者并拉取全量状态
+message WatchRequest {}
+
+// GameStateRequest 拉取全量对局状态(重连/状态同步)
+message GameStateRequest {}
+
+// GameStateResponse 全量对局状态
+message GameStateResponse {
+  ResultCode          code             = 1;
+  string              msg              = 2;
+  string              room_id          = 3;
+  RoomState           state            = 4;
+  int32               win_len          = 5;
+  repeated PlayerInfo players          = 6;
+  BoardState          board            = 7;
+  int32               current_seat     = 8;  // 当前行动座位
+  int32               move_no          = 9;  // 已落子步数
+  PlayerRole          role             = 10; // 请求者角色
+  int32               spectators       = 11;
+  int32               turn_timeout_sec = 12;
+  int64               deadline_unix_ms = 13; // 当前回合截止时间
+  string              winner_uid       = 14; // 已结束时有效
+  int32               winner_seat      = 15; // -1=平局
+  EndReason           reason           = 16;
+  repeated Cell       winning_line     = 17;
+}
+
+// AckResponse 通用应答
+message AckResponse {
+  ResultCode code = 1;
+  string     msg  = 2;
+}
+
+// ==================== 服务器间 RPC(内部, 非客户端可见) ====================
+
+// RoomMember 房间成员(lobby 撮合结果)
+message RoomMember {
+  string uid  = 1;
+  string name = 2;
+  int32  seat = 3;
+}
+
+// CreateRoomRequest lobby -> game: 按分配的 roomId 与花名册建房开局
+// with_ai=true 时缺席的座位由 AI 补位。
+message CreateRoomRequest {
+  string              room_id   = 1;
+  repeated RoomMember members   = 2;
+  bool                with_ai   = 3;
+  int32               first_seat = 4; // 先手座位
+}
+
+// RestoreRoomRequest lobby -> game: 请求从 Redis 快照恢复房间并续跑
+message RestoreRoomRequest {
+  string room_id = 1;
+}
+
+// PlayerConnRequest connector/lobby -> game: 通报玩家连接状态变化
+// online=false: 掉线, 由 game 开启宽限计时(观战者则直接移除)
+// online=true : 重连成功, 取消宽限计时
+message PlayerConnRequest {
+  string room_id = 1;
+  string uid     = 2;
+  bool   online  = 3;
+}
+
+// PlayerConnResponse game -> 调用方: 返回该 uid 在房间内的身份
+message PlayerConnResponse {
+  ResultCode code = 1;
+  string     msg  = 2;
+  int32      seat = 3; // -1=非对局玩家(观战者)
+  PlayerRole role = 4;
+}
+
+// ResolveOwnerRequest connector/lobby -> lobby: 查询或重指派房间 owner
+message ResolveOwnerRequest {
+  string room_id = 1;
+}
+
+// ResolveOwnerResponse 返回当前(可能新指派的)owner 节点 ID
+message ResolveOwnerResponse {
+  ResultCode code  = 1;
+  string     msg   = 2;
+  string     owner = 3;
+}
+
+// ==================== 状态快照(写入 Redis, 每步落子后) ====================
+
+// PlayerState 玩家状态快照
+message PlayerState {
+  string uid           = 1;
+  string name          = 2;
+  int32  seat          = 3;
+  bool   is_ai         = 4;
+  int32  timeout_count = 5;
+  bool   online        = 6;
+}
+
+// GameSnapshot 房间状态快照(用于 owner 宕机后在其他节点恢复续跑)
+message GameSnapshot {
+  string               room_id      = 1;
+  RoomState            state        = 2;
+  int32                cols         = 3;
+  int32                rows         = 4;
+  bytes                cells        = 5; // 同 BoardState.cells 编码
+  int32                current_seat = 6;
+  int32                move_no      = 7;
+  int32                first_seat   = 8;
+  repeated PlayerState players      = 9;
+  string               winner_uid   = 10;
+  int32                winner_seat  = 11;
+  EndReason            reason       = 12;
+  int64                started_at   = 13;
+  repeated int32       moves        = 14; // 落子列序(棋谱, 便于回放/排错)
+}
+
+// ==================== 推送消息 ====================
+
+// MatchUpdatePush 匹配状态更新
+message MatchUpdatePush {
+  MatchState state            = 1;
+  int32      waiting_seconds  = 2;
+  string     msg              = 3;
+}
+
+// GameStartPush 开局(亦用于恢复后的全量 resync)
+message GameStartPush {
+  string              room_id          = 1;
+  int32               cols             = 2;
+  int32               rows             = 3;
+  int32               win_len          = 4;
+  repeated PlayerInfo players          = 5;
+  int32               first_seat       = 6;
+  int32               turn_timeout_sec = 7;
+  BoardState          board            = 8; // resync 时为当前棋盘, 开局为空盘
+  int32               current_seat     = 9;
+  int32               move_no          = 10;
+  bool                resync           = 11; // true=故障恢复后的重同步
+}
+
+// TurnStartPush 轮到某玩家行动
+message TurnStartPush {
+  string uid              = 1;
+  int32  seat             = 2;
+  int32  move_no          = 3;
+  int64  deadline_unix_ms = 4;
+}
+
+// PieceDroppedPush 落子结果
+message PieceDroppedPush {
+  string uid        = 1;
+  int32  seat       = 2;
+  int32  col        = 3;
+  int32  row        = 4;
+  Piece  piece      = 5;
+  int32  move_no    = 6;
+  bool   by_timeout = 7; // true=超时由服务端代落
+}
+
+// GameOverPush 对局结束
+message GameOverPush {
+  string        winner_uid   = 1;
+  int32         winner_seat  = 2; // -1=平局
+  string        winner_name  = 3;
+  EndReason     reason       = 4;
+  repeated Cell winning_line = 5;
+  BoardState    board        = 6;
+}
+
+// OpponentStatusPush 对手在线状态变化
+message OpponentStatusPush {
+  string uid            = 1;
+  int32  seat           = 2;
+  bool   online         = 3;
+  int32  grace_seconds  = 4; // 掉线宽限剩余秒数(online=false 时有效)
+}
+
+// SpectatorUpdatePush 观战人数变化
+message SpectatorUpdatePush {
+  string room_id = 1;
+  int32  count   = 2;
+}
+
+// ErrorPush 错误推送
+message ErrorPush {
+  ResultCode code = 1;
+  string     msg  = 2;
+}
+
+// ==================== 服务接口(客户端可调用) ====================
+
+// ConnectorService 前端(connector)接口, 客户端直连。
+service ConnectorService {
+  // 路由: connector.login  登录并绑定会话(支持 last_uid 身份续接)
+  rpc Login(LoginRequest) returns (LoginResponse);
+}
+
+// LobbyService 匹配(lobby)接口, 客户端经 connector 转发(路由前缀 lobby.lobby.*)。
+service LobbyService {
+  // 路由: lobby.lobby.match        请求匹配
+  rpc Match(MatchRequest) returns (MatchResponse);
+  // 路由: lobby.lobby.cancelmatch  取消匹配
+  rpc CancelMatch(CancelMatchRequest) returns (AckResponse);
+  // 路由: lobby.lobby.reconnect    断线重连定位房间
+  rpc Reconnect(ReconnectRequest) returns (ReconnectResponse);
+  // 路由: lobby.lobby.roomlist     可观战房间列表
+  rpc RoomList(RoomListRequest) returns (RoomListResponse);
+  // 路由: lobby.lobby.spectate     选择观战房间(写入 session 粘性路由)
+  rpc Spectate(SpectateRequest) returns (AckResponse);
+}
+
+// GameService 对局(game)接口, 客户端经 connector 按 session.gameServer 粘性路由。
+service GameService {
+  // 路由: game.game.drop          落子
+  rpc Drop(DropRequest) returns (AckResponse);
+  // 路由: game.game.watch         注册观战并拉取全量状态
+  rpc Watch(WatchRequest) returns (GameStateResponse);
+  // 路由: game.game.getgamestate  拉取全量状态(重连/同步)
+  rpc GetGameState(GameStateRequest) returns (GameStateResponse);
+}
+
+// ==================== 服务端推送(Push)路由一览 ====================
+// 以下为服务器 -> 客户端的推送(非 rpc), route 与消息的对应关系:
+//   onMatchUpdate      -> MatchUpdatePush       匹配状态更新
+//   onGameStart        -> GameStartPush         开局 / 恢复后全量重同步
+//   onTurnStart        -> TurnStartPush         轮到某玩家行动(含截止时间)
+//   onPieceDropped     -> PieceDroppedPush      落子结果
+//   onGameOver         -> GameOverPush          对局结束(含获胜连线)
+//   onOpponentOffline  -> OpponentStatusPush    对手掉线(含宽限秒数)
+//   onOpponentOnline   -> OpponentStatusPush    对手重连回来
+//   onSpectatorUpdate  -> SpectatorUpdatePush   观战人数变化
+//   onError            -> ErrorPush             错误提示
+// =====================================================================

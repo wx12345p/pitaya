@@ -102,6 +102,37 @@ run-richman-example-testclient:
 run-richman-example-localinfra:
 	@cd examples/demo/richman && GOWORK=off go run ./localinfra
 
+# connect4(四子棋) 同为独立的 pitaya v2 模块, 需 GOWORK=off 并在其目录内运行
+# 多节点集群: 1 lobby(匹配) + 2 game(对局) + 2 connector(接入)
+run-connect4-example-lobby:
+	@cd examples/demo/connect4 && GOWORK=off go run . --type lobby --frontend=false --port 4252
+
+run-connect4-example-lobby2:
+	@cd examples/demo/connect4 && GOWORK=off go run . --type lobby --frontend=false --port 4254
+
+run-connect4-example-game:
+	@cd examples/demo/connect4 && GOWORK=off go run . --type game --frontend=false --port 4251
+
+run-connect4-example-game2:
+	@cd examples/demo/connect4 && GOWORK=off go run . --type game --frontend=false --port 4253
+
+run-connect4-example-connector:
+	@cd examples/demo/connect4 && GOWORK=off go run . --type connector --frontend=true --port 4250
+
+run-connect4-example-connector2:
+	@cd examples/demo/connect4 && GOWORK=off go run . --type connector --frontend=true --port 4260
+
+# 验收场景: duel(双人) / ai(人机) / reconnect(断线重连) / spectate(观战)
+#          failover(宕机恢复) / cancel(取消匹配) / timeout(超时判负)
+run-connect4-example-testclient:
+	@cd examples/demo/connect4 && GOWORK=off go run ./testclient --scenario $(or $(SCENARIO),duel)
+
+run-connect4-example-localinfra:
+	@cd examples/demo/connect4 && GOWORK=off go run ./localinfra
+
+test-connect4-example:
+	@cd examples/demo/connect4 && GOWORK=off go test ./...
+
 run-custom-metrics-example:
 	@cd examples/demo/custom_metrics && go run main.go --port 3250
 
@@ -112,6 +143,7 @@ protos-compile-demo:
 	@protoc -I examples/demo/protos examples/demo/protos/*.proto --go_out=.
 	@protoc -I examples/demo/landlord/protos examples/demo/landlord/protos/*.proto --go_out=.
 	@protoc -I examples/demo/richman/protos examples/demo/richman/protos/*.proto --go_out=paths=source_relative:examples/demo/richman/protos
+	@protoc -I examples/demo/connect4/protos examples/demo/connect4/protos/*.proto --go_out=paths=source_relative:examples/demo/connect4/protos
 
 protos-compile:
 	@cd benchmark/testdata && ./gen_proto.sh
